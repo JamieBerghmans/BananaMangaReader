@@ -33,6 +33,7 @@ import os
 import csv
 import shutil
 import time
+import urllib.parse
 
 app=flask.Flask(__name__)
 
@@ -56,17 +57,21 @@ def GetRes():
 def ShowRes(srch):
     user_selections['manga']=1000000 #reset global tracking
     search_string=flask.request.form["srchstr"]
+    
+    search_results.clear()
+    
+    # MangaKakalot crawling
     a=search_string.replace("'","")
     a=a.split(' ')
-    usable_search_string=''
+    mangakakalot_search_string=''
     for i in range(len(a)):
         if i==0:
-            usable_search_string=usable_search_string+a[i]
+            mangakakalot_search_string=mangakakalot_search_string+a[i]
         else:
-            usable_search_string=usable_search_string+'-'+a[i]
-    
+            mangakakalot_search_string=mangakakalot_search_string+'-'+a[i]
+
     #title search:
-    data1=requests.get('https://mangakakalot.com/search/story/'+usable_search_string, headers={'User-agent': 'Mozilla/5.0'}).text
+    data1=requests.get('https://mangakakalot.com/search/story/'+mangakakalot_search_string, headers={'User-agent': 'Mozilla/5.0'}).text
     
     # #find actual titles from data (with author last chapter and update date and link)
     
@@ -85,51 +90,102 @@ def ShowRes(srch):
 
         manga_author=r1[i+1].split('<span>Author(s)')[1].split(':')[1].split('<')[0].strip()
         manga_update=r1[i+1].split('<span>Updated')[1].split(':')[1].split(' ')[1]
-        search_results[str(i+1)]={'url': manga_url,
+        search_results[len(search_results)+1]={'url': manga_url,
                                'title': manga_title,
                                'last_ch': manga_last_ch,
                                'update': manga_update,
                                'author': manga_author}
-    
-    return flask.render_template('searchres.html', n_manga=n_manga, res=search_results)   
+
+
+    # Manga Hub crawling
+    mangahub_search_string=urllib.parse.quote(search_string)
+    mangahub_data=requests.get('https://mangahub.io/search?q='+mangahub_search_string, headers={'User-agent': 'Mozilla/5.0'}).text
+
+    mangahub_entries=mangahub_data.split('<div class="media-manga media">')
+
+    #remove first entry as this contains the headers and everything else
+    mangahub_entries.pop(0)
+
+
+    mangahub_entries_length=len(mangahub_entries)
+    for i in range(mangahub_entries_length):
+        hrefs=mangahub_entries[i].split('href="')
+
+        #remove first entry as this contains the div
+        hrefs.pop(0)
+
+        manga_url=hrefs[1].split('">')[0]
+        manga_title=hrefs[1].split('"')[1].split("<")[0].removeprefix('>')
+        pre_chapter_parts=hrefs[2].split('">')
+        chapter_parts=pre_chapter_parts[0].split('chapter')
+        manga_last_ch=chapter_parts[len(chapter_parts)-1].removeprefix('-')
+        manga_update='Not provided'
+        manga_author=hrefs[1].split('<small>')[1].split('</small>')[0].removeprefix('by ')
+        search_results[len(search_results)+1]={'url': manga_url,
+                           'title': manga_title,
+                           'last_ch': manga_last_ch,
+                           'update': manga_update,
+                           'author': manga_author}
+
+    return flask.render_template('searchres.html', n_manga=len(search_results), res=search_results)   
 
 @app.route("/manga_result/choice/<usr_choice>")
 def GetMangaData(usr_choice):
 
-    manga_selected=usr_choice
-    user_selections['manga']=usr_choice #global tracking
+    manga_selected=int(usr_choice)
+    user_selections['manga']=int(usr_choice) #global tracking
     user_selections['chapter']=1000000 # to ensure that when a new manga is selected, but same chapter is selected, GetChap gets us the right info
     
-    manga_data['url']=search_results[str(manga_selected)]['url']
-    manga_data['title']=search_results[str(manga_selected)]['title']
+    manga_data['url']=search_results[manga_selected]['url']
+    manga_data['title']=search_results[manga_selected]['title']
 
     # open manga page, get chapter list: links and numbers
-    data2=requests.get(search_results[str(manga_selected)]['url'], headers={'User-agent': 'Mozilla/5.0'}).text
+    data2=requests.get(search_results[manga_selected]['url'], headers={'User-agent': 'Mozilla/5.0'}).text
     
     #Get author name:
-    manga_data['author']=data2.split('/author/')[1].split('>')[1].split('<')[0]
+    if 'mangakakalot.com' in manga_data['url'] or 'manganelo.com' in manga_data['url']:
+        manga_data['author']=data2.split('/author/')[1].split('>')[1].split('<')[0]
+    else:
+        manga_data['author']=data2.split('Author</span><span>')[1].split('</span>')[0]
     
     #add description
-    manga_data['description']=data2.split('"description"')[1].split('"')[1].replace('&quot;','"').replace("&#39;","'")
+    if 'mangakakalot.com' in manga_data['url'] or 'manganelo.com' in manga_data['url']:
+        manga_data['description']=data2.split('"description"')[1].split('"')[1].replace('&quot;','"').replace("&#39;","'")
+    else:
+        manga_data['description']=data2.split('<meta name="description"')[1].split('/>')[0].replace('\n', '').replace('\r', '').removeprefix(' content="').removesuffix('"')
     
     #get manga cover image
-    manga_cover_link=data2.split('"og:image" content')[1].split('"')[1]
+    if 'mangakakalot.com' in manga_data['url'] or 'manganelo.com' in manga_data['url']:
+        manga_cover_link=data2.split('"og:image" content')[1].split('"')[1]
+    else:
+        manga_cover_link=data2.split('"og:image" content="')[1].split('"')[0]
+
+
     manga_data['cover_img_link']=manga_cover_link
     
     #get genres:
     manga_data['genres']=[]
-    g_data=data2.split('Genres')[1].split('</li>')[0]
-    g_data=g_data.split('</a>')
-    n_genres=len(g_data)-1
-    for i in range(n_genres):
-        if 'mangakakalot.com' in manga_data['url']:
-            g_n=g_data[i].split('>')[1]
-            manga_data['genres'].append(g_n)
-        elif 'readmanganato.com' in manga_data['url']:
-            if i not in [0,n_genres-1]:
+
+    if 'mangakakalot.com' in manga_data['url'] or 'manganelo.com' in manga_data['url']:
+        g_data=data2.split('Genres')[1].split('</li>')[0]
+        g_data=g_data.split('</a>')
+        n_genres=len(g_data)-1
+        for i in range(n_genres):
+            if 'mangakakalot.com' in manga_data['url']:
                 g_n=g_data[i].split('>')[1]
                 manga_data['genres'].append(g_n)
-    
+            elif 'readmanganato.com' in manga_data['url']:
+                if i not in [0,n_genres-1]:
+                    g_n=g_data[i].split('>')[1]
+                    manga_data['genres'].append(g_n)
+    else:
+        g_data=data2.split('class="label genre-label">')
+        g_data.pop(0)
+        for genre_split in g_data:
+            genre=genre_split.split('</a>')[0]
+            manga_data['genres'].append(genre)
+
+
     #Get chapter data
     manga_data['ch_list']={}
     #add chapters: process different for each website:
@@ -158,6 +214,34 @@ def GetMangaData(usr_choice):
             manga_data['ch_list'][str(ch_num)]={'ch_link': ch_link,
                                                 'ch_title': ch_title,
                                                 'ch_update': ch_update}
+            
+    else:
+        ch_data=data2.split('list-group-item')
+        ch_data.pop(0)
+        n_ch=len(ch_data)
+        for chaptersplit in ch_data:
+            ch_subset_split=chaptersplit.split('href="')
+            if len(ch_subset_split) > 2:
+                ch_subset=ch_subset_split[2] 
+            else:
+                ch_subset=ch_subset_split[1]
+            ch_link=ch_subset.split('"')[0]
+            ch_num_url_split=ch_link.split('/')
+            ch_num_url=ch_num_url_split[len(ch_num_url_split)-1].split('-')[1]
+            ch_num_split=ch_subset.split('class="text-secondary ')[1].split('>#')[1].split('</span>')
+            ch_num=ch_num_split[0].split('>')[1]
+            print(ch_num_url)
+            print(ch_num)
+            if (ch_num_url==ch_num):
+                ch_title_split=ch_num_split[1].split('</span>')[0].split('>')
+                ch_title=ch_title_split[len(ch_title_split)-1]
+                ch_update_split_small=ch_subset.split('</small>')
+                ch_update_split_greaterthan=ch_update_split_small[len(ch_update_split_small)-2].split('>')
+                ch_update=ch_update_split_greaterthan[len(ch_update_split_greaterthan)-1]
+                manga_data['ch_list'][str(ch_num)]={'ch_link': ch_link,
+                                                'ch_title': ch_title,
+                                                'ch_update': ch_update}
+                
     
     manga_data['last_ch']=list(manga_data['ch_list'].keys())[0]
     manga_data['update']=manga_data['ch_list'][manga_data['last_ch']]['ch_update']
@@ -259,7 +343,7 @@ def GetChap(ch_no,p_no):
 
         
     #link for manga title page
-    manga_home_link='/manga_result/choice/'+user_selections['manga']
+    manga_home_link='/manga_result/choice/'+str(user_selections['manga'])
     
     #we need key of next chap and previous chap
     ch_all=list(manga_data['ch_list'].keys()) #list of keys
@@ -305,7 +389,7 @@ def FavAdd():
             writer.writerow([m_title, m_url])
     csv_file.close()
         
-    manga_home_link='/manga_result/choice/'+user_selections['manga']
+    manga_home_link='/manga_result/choice/'+str(user_selections['manga'])
     
     return flask.render_template('favadded.html', favtitle=m_title, manga_home_link=manga_home_link)
 
@@ -326,7 +410,7 @@ def FavDisp():
     num=0
     for manga in manga_favs:
         num=num+1
-        search_results[str(num)]={'title': manga,
+        search_results[num]={'title': manga,
                                   'url': manga_favs[manga]}
     n_manga=len(search_results)
     #This page should be similar to searchres
@@ -381,14 +465,14 @@ def LibUpdate():
     chapdir='static/library/'+manga_title+'/'+chapter_title
 
     if os.path.exists(chapdir):
-        manga_home_link='/manga_result/choice/'+user_selections['manga']
+        manga_home_link='/manga_result/choice/'+str(user_selections['manga'])
         return flask.render_template('libadded.html', t=manga_data['title'], c=manga_data['ch_list'][user_selections['chapter']]['ch_title'], manga_home_link=manga_home_link)
 
     else: #if it does not exist, meaning that chapter is new; create dir
         os.makedirs(chapdir)
         #now that the chapter folder is created, copy chapter pages from chapter cache
         shutil.copytree('static/chapter_cache', chapdir, dirs_exist_ok=True)
-        manga_home_link='/manga_result/choice/'+user_selections['manga']
+        manga_home_link='/manga_result/choice/'+str(user_selections['manga'])
         return flask.render_template('libadded.html', t=manga_data['title'], c=manga_data['ch_list'][user_selections['chapter']]['ch_title'], manga_home_link=manga_home_link)
     
     
@@ -475,23 +559,23 @@ def navigationpage():
 def aboutpage():
     return flask.render_template('about.html')
     
-@app.route("/shutdown", methods=["POST","GET"])
-def shutdown():
-    if flask.request.method=="POST":  
-        #clear old files from cache
-        dir2clear = 'static/chapter_cache'
-        for f in os.listdir(dir2clear):
-            os.remove(os.path.join(dir2clear, f))
+# @app.route("/shutdown", methods=["POST","GET"])
+# def shutdown():
+#     if flask.request.method=="POST":  
+#         #clear old files from cache
+#         dir2clear = 'static/chapter_cache'
+#         for f in os.listdir(dir2clear):
+#             os.remove(os.path.join(dir2clear, f))
             
-        # return ip to what it was
-        os.system('ip addr del 127.0.0.1/8 dev lo')
-        os.system('ip addr del 127.0.0.42/32 dev lo')
+#         # return ip to what it was
+#         os.system('ip addr del 127.0.0.1/8 dev lo')
+#         os.system('ip addr del 127.0.0.42/32 dev lo')
         
-        # shutdown_server()
-        os.system('pkill -15 -f "BMR"')
-        return flask.render_template('shutdown.html')
-    else:
-        return flask.render_template('shutdown.html')
+#         # shutdown_server()
+#         os.system('pkill -15 -f "BMR"')
+#         return flask.render_template('shutdown.html')
+#     else:
+#         return flask.render_template('shutdown.html')
 
-# if __name__=="__main__":
-#     app.run(host='127.0.0.42', port=1234)
+if __name__=="__main__":
+    app.run(host='127.0.0.42', port=1234)
